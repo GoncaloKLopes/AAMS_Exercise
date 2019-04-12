@@ -1,13 +1,14 @@
 import sys
 import re
 import copy
-from scipy.optimize import linprog
 import numpy as np
+import simplex
+
 import math
 
 OPTION_RE = "([a-zA-Z][0-9]*)=\(([0-9]+%?),(.+)\)"
 LOTTERY_RE = "\[(([a-zA-Z][0-9]*=\([0-9]*%?,.+\),?)+)\]"
-UPDATE_RE = "\((-?[0-9]+),(.+)\)"
+UPDATE_RE = "\((-?[0-9\.]+),(.+)\)"
 ENCOUNTER_RE = "mine=\((.+)\),peer=\((.+)\)"
 ENCOUNTER_UPDATE_RE = "mine=(-?[0-9]+),peer=(-?[0-9]+)"
 
@@ -32,14 +33,19 @@ class Agent:
         else:
             self.type = ENCOUNTER_AGENT
             self.state = string_to_bimatrix(state)
+        self.last = None
 
     def update(self, observation):
         if self.type == SOLO_AGENT:
-            self.state = update_behavior(self.state, observation)
+            self.state = update_behavior(self.state, self.last, observation)
 
     def decide(self, behavior):
         if behavior == DECIDE_RATIONAL:
-            return decide_rational(self.state)
+            res = decide_rational(self.state)
+            if res != BLANK_STRING:
+                self.last = res
+            #print(self.state)
+            return res
         elif behavior == DECIDE_RISK:
             return decide_risk(self.state)
         elif behavior == DECIDE_NASH:
@@ -47,7 +53,10 @@ class Agent:
         elif behavior == DECIDE_MIXED:
             return decide_mixed(self.state)
         else:
-            return decide_conditional(self.state)
+            res = decide_conditional(self.state)
+            if res != BLANK_STRING:
+                self.last = (res.split(",")[0]).split("=")[1]
+            return res
 
 
 class Option:
@@ -62,7 +71,7 @@ class Option:
         return "".join([self.id, "=(", prob, ",", str(self.lottery), ")"])
 
     def has_nested_occurrences(self):
-        if isinstance(self.lottery.options, int):
+        if isinstance(self.lottery.options, float):
             return self.type == OCCUR_TYPE
         else:
             for option in self.lottery.options:
@@ -87,7 +96,7 @@ class Option:
 class Lottery:
     def __init__(self, options):
         self.options = options
-        if isinstance(self.options, int):
+        if isinstance(self.options, float):
             self.type = None
         else:
             self.type = options[0].type
@@ -103,7 +112,7 @@ class Lottery:
         return self.options[idx]
 
     def get_utility(self):
-        if isinstance(self.options, int):
+        if self.type == None:
             utility = self.options
         else:
             utility = 0
@@ -142,29 +151,30 @@ class Bimatrix:
         lott1, lott2 -> numpy.ndarray of shape (2, 2) with lotteries for each choice
         """
         self.ids = ids
-        self.len = len(self.ids)
-
+        self.shape = (len(ids[0]), len(ids[1]))
         if type(lott1) != np.ndarray:
             raise Exception("lott1 is not an numpy.ndarray!")
         if type(lott2) != np.ndarray:
             raise Exception("lott2 is not an numpy.ndarray!")
-        if lott1.shape != (self.len, self.len):
+        if lott1.shape != (self.shape[0], self.shape[1]):
             raise Exception("lott1 has wrong shape", lott1.shape, "!")
-        if lott2.shape != (self.len, self.len):
+        if lott2.shape != (self.shape[1], self.shape[0]):
             raise Exception("lott2 has wrong shape", lott2.shape, "!")
 
-        self.mat = np.empty((self.len, self.len, 2), dtype=Lottery)
-        for i in range(self.len):
-            for j in range(self.len):
+        self.mat = np.empty((self.shape[0], self.shape[1], 2), dtype=Lottery)
+        for i in range(self.shape[0]):
+            for j in range(self.shape[1]):
                 self.mat[i, j, 0] = lott1[i, j]
-                self.mat[i, j, 1] = lott2[i, j]
+                self.mat[i, j, 1] = lott2[j, i]
 
-        self.utilities_mat = np.zeros((self.len, self.len, 2))
+        self.utilities_mat = np.zeros((self.shape[0], self.shape[1], 2))
 
-        for i in range(self.len):
-            for j in range(self.len):
+        for i in range(self.shape[0]):
+            for j in range(self.shape[1]):
                 for k in range(2):
                     self.utilities_mat[i, j, k] = self.mat[i, j, k].get_utility()
+
+
 
     def __getitem__(self, idx):
         i, j = idx
@@ -178,29 +188,27 @@ class Bimatrix:
         Returns a list of tuples with 2 elements: ((T0, T1) (3, 4))
         """
         res = []
-        nash = np.zeros((self.len, self.len, 2))
+        nash = np.zeros((self.shape[0], self.shape[1], 2))
+        maxes = np.zeros((2, self.shape[0], self.shape[1]))
 
-        maxes = np.empty((2, self.len, self.len))
-
-        for i in range(self.len):
-                maxes[0, i] = max_indices([u[0] for u in self.utilities_mat[:, i]])
-        for i in range(self.len):
-                maxes[1, i] = max_indices([u[1] for u in self.utilities_mat[i, :]])
-
+        for i in range(self.shape[1]):
+                maxes[0, :, i] = max_indices([u[0] for u in self.utilities_mat[:, i]])
+        for i in range(self.shape[0]):
+                maxes[1, i, :] = max_indices([u[1] for u in self.utilities_mat[i, :]])
         #check nash for p1
-        for i in range(self.len):
-            for j in range(self.len):
+        for i in range(self.shape[0]):
+            for j in range(self.shape[1]):
                 nash[i, j, 0] = maxes[0, i, j]
 
         #check nash for p2
-        for i in range(self.len):
-            for j in range(self.len):
+        for i in range(self.shape[0]):
+            for j in range(self.shape[1]):
                 nash[i, j, 1] = maxes[1, i, j]
 
-        for i in range(self.len):
-            for j in range(self.len):
+        for i in range(self.shape[0]):
+            for j in range(self.shape[1]):
                 if (nash[i, j, 0] and nash[i, j, 1]):
-                    res.append(((self.ids[i], self.ids[j]), tuple(self.utilities_mat[i, j, k] for k in range(2))))
+                    res.append(((self.ids[0][i], self.ids[1][j]), tuple(self.utilities_mat[i, j, k] for k in range(2))))
         return res
 ################################################################################
 
@@ -223,8 +231,8 @@ def string_to_option(string):
     return Option(id, prob, lottery)
 
 def string_to_lottery(string):
-    if re.match("-?[0-9]+", string):
-        return Lottery(int(string))
+    if re.match("-?[0-9\.]+", string):
+        return Lottery(float(string))
     options = []
     curr_str = ""
     start = 1
@@ -255,49 +263,59 @@ def string_to_bimatrix(string):
     mine, peer = m.groups()
 
     plotts = [[], []]
-    tids = []
-
+    tids = [[], []]
+    it = 0
     for pstring, plott in zip((mine, peer), plotts):
         pmode = 0
         cont = 1
         start = 0
         curr_lotts = []
+        curr_cell = []
+        last_tid0 = ""
+
         while cont:
             tid_aux0 = ""
             tid_aux1 = ""
-            for i in range(start, len(pstring)):
-                #print(pstring[i])
 
+            for i in range(start, len(pstring)):
                 if pstring[i] != "|" and pstring[i] != "=":
                     if not pmode:
                         tid_aux0 += pstring[i]
-
                     else:
                         tid_aux1 += pstring[i]
 
                 elif pstring[i] == "|":
-                    if not tid_aux0 in tids:
-                        tids.append(tid_aux0)
+                    if not it and not tid_aux0 in tids[0]:
+                        tids[0].append(tid_aux0)
+                    elif it and not tid_aux0 in tids[1]:
+                        tids[1].append(tid_aux0)
                     pmode = 1
 
+
                 elif pstring[i] == "=":
-                    if not tid_aux1 in tids:
-                        tids.append(tid_aux1)
                     pmode = 0
 
                     matching_idx = find_matching_parenthesis(pstring, i + 1)
-                    curr_lotts.append(string_to_lottery(pstring[i+1:matching_idx+1]))
+                    new_cell = string_to_lottery(pstring[i+1:matching_idx+1])
+                    if tid_aux0 == last_tid0:
+                        curr_cell.append(new_cell)
+
+                    else:
+                        curr_cell = [new_cell]
+                        curr_lotts.append(curr_cell)
+                        last_tid0 = tid_aux0
+
                     start = matching_idx + 2
                     if start >= len(pstring):
                         cont = 0
                     break
-
-        plott.append(split_list_equals(curr_lotts))
+        it += 1
+        plott.append(curr_lotts)
 
     for i in range(len(plotts)):
         plotts[i] = np.squeeze(plotts[i])
 
-    return Bimatrix(tuple(tids), np.array(plotts[0], dtype=Lottery), np.array(plotts[1], dtype=Lottery))
+    return Bimatrix(tids, np.array(plotts[0], dtype=Lottery), np.array(plotts[1], dtype=Lottery))
 
 def parse_input(inpt):
     tasks = {}
@@ -312,7 +330,7 @@ def parse_input(inpt):
                 matching_idx = find_matching_parenthesis(inpt, i+1)
                 tasks[curr_id] = string_to_lottery(inpt[i+1:matching_idx+1])
                 start = matching_idx + 2
-                if start > (len(inpt) - 1):
+                if start >= (len(inpt) - 1):
                     cont = 0
                 curr_id = ""
                 break
@@ -330,54 +348,80 @@ def decide_rational(tasks):
             max_util = (key, aux_max)
     return max_util[0]
 
-def update_behavior(tasks, inpt):
+def update_behavior(tasks, last, inpt):
     pat = re.compile(UPDATE_RE)
     match = pat.match(inpt)
 
-    new_lottery = Lottery(int(match.group(1)))
+    new_lottery = Lottery(float(match.group(1)))
     tiers = (match.group(2)).split(".")
     new_tasks = copy.deepcopy(tasks)
-    curr_lott = new_tasks[tiers[0]]
+
+    curr_lott = new_tasks[last]
     new_options = []
 
-    if len(tiers) > 1:
-        for tier in tiers[1:-1]:
-            #as we progress through the tiers, check every option and verify if
-            #it's a probability or if it has nested occurrence options,
-            #creating a new list of updated options
-            for option in curr_lott.options:
-                if option.id == tier:
-                    if option.type == OCCUR_TYPE:
-                        option.prob += 1
-                    else:
-                        option.prob = 1
-                        option.type = OCCUR_TYPE
-                        curr_lott.type = OCCUR_TYPE
-                        option.propagate_occur()
-                elif option.type == OCCUR_TYPE:
-                    pass #will be appended after this big if
-                elif option.has_nested_occurrences() and option.type == PROB_TYPE:
-                    option.prob = 0
-                    option.type = OCCUR_TYPE
-                    option.propagate_occur()
+    #print(curr_lott)
+
+    for tier in tiers:
+        #as we progress through the tiers, check every option and verify if
+        #it's a probability or if it has nested occurrence options,
+        #creating a new list of updated options
+        if len(tiers) > 1 and tier == tiers[-1]:
+            break
+        for option in curr_lott.options:
+            if option.id == tier:
+                if option.type == OCCUR_TYPE:
+                    option.prob += 1
                 else:
-                    continue
-                new_options.append(option)
-            curr_lott.options = new_options
+                    option.prob = 1
+                    option.type = OCCUR_TYPE
+                    curr_lott.type = OCCUR_TYPE
+                    option.propagate_occur()
+            elif option.type == OCCUR_TYPE:
+                pass #will be appended after this big if
+            elif option.has_nested_occurrences() and option.type == PROB_TYPE:
+                option.prob = 0
+                option.type = OCCUR_TYPE
+                option.propagate_occur()
+            else:
+                continue
+            new_options.append(option)
+        curr_lott.options = new_options
+
+        if tier != tiers[-1]:
             new_options = []
             curr_lott = (curr_lott.get_option(tier)).lottery
 
-
-    if curr_lott.type == PROB_TYPE or curr_lott.type == None:
+    curr_lott = new_tasks[last]
+    if len(curr_lott.options) == 0:
         curr_lott.options = [Option(tiers[-1], 1, new_lottery)]
         curr_lott.type = OCCUR_TYPE
-        curr_lott.prob = 1
     else:
-        old_option = curr_lott.get_option(tiers[-1])
-        if old_option == None:
-            (curr_lott.options).append(Option(tiers[-1], 1, new_lottery))
-        else:
-            old_option.prob += 1
+        for tier in tiers:
+            if tier != tiers[-1]:
+                curr_option = curr_lott.get_option(tier)
+                curr_lott = curr_lott.get_option(tier).lottery
+            else:
+                if not curr_lott.type == None:
+                    curr_option = curr_lott.get_option(tier)
+                    if curr_option:
+                        if curr_option.lottery.get_utility() == new_lottery.get_utility():
+                            if curr_option.type == PROB_TYPE or curr_option.type == None:
+                                curr_option.type = OCCUR_TYPE
+                                curr_option.prob = 1
+                            else:
+                                curr_option.prob += 1
+                        else:
+                            new_options = [Option(tiers[-1] + "1", curr_option.prob - 1, curr_option.lottery),
+                                           Option(tiers[-1] + "2", 1, new_lottery)]
+                            new_lott = Lottery(new_options)
+                            curr_option.lottery = new_lott
+                    else:
+                        curr_lott.options.append(Option(tiers[-1], 1, new_lottery))
+                else:
+                    new_options = [Option(tiers[-1], 1, new_lottery)]
+                    curr_option.lottery = Lottery(new_options)
+                    curr_lott.type = OCCUR_TYPE
+                    curr_option.type = OCCUR_TYPE
 
     return new_tasks
 
@@ -389,8 +433,8 @@ def decide_risk(tasks):
     c = np.zeros(l)
     A_ub = np.zeros((1, l))
     A_eq = np.ones((1, l))
-    b_ub = np.array([[0]])
-    b_eq = np.array([[1]])
+    b_ub = np.array([0])
+    b_eq = np.array([1])
 
     for i, task_id in enumerate(tasks):
         c[i] = -1 * tasks[task_id].get_utility()
@@ -405,26 +449,57 @@ def decide_risk(tasks):
         aux[0, pair[0]] = 1
         aux[0, pair[1]] = -1
         A_eq = np.vstack((A_eq, aux))
-        b_eq = np.vstack((b_eq, 0))
-
+        b_eq = np.append(b_eq, 0)
+    """
+    print(10*"*")
+    print("c", c)
+    print("A_eq", A_eq)
+    print("A_ub", A_ub)
+    print("b_eq", b_eq)
+    print("b_ub", b_ub)
+    print(10*"x")
+    """
     all_neg = True
+    all_pos = True
     for el in A_ub[0]:
         if el < 0:
             all_neg = False
-            break
-    if not all_neg:
-       # print(linprog(c, method="simplex", A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub = b_ub))
-        contribs = linprog(c, method="simplex", A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub = b_ub).x
+        elif el > 0:
+            all_pos = False
+
+    def simple_maximize(c):
+        mx = max(c)
+        res = []
+        max_idx = c.index(mx)
+        eq_count = 0
+        for i in range(len(c)):
+            if c[i] == mx:
+                eq_count += 1
+
+        for i in range(len(c)):
+            if c[i] == mx:
+                res.append(1 / eq_count)
+            else:
+                res.append(0)
+        return res
+
+
+    if all_pos or all_neg:
+        contribs = simple_maximize((-1 * c).tolist())
+
     else:
-        #print(linprog(c, method="simplex", A_eq=A_eq, b_eq=b_eq))
-        contribs = linprog(np.squeeze(A_ub, axis=0), method="simplex", A_eq=A_eq, b_eq=b_eq).x
+        _, contribs = simplex.linsolve(c, ineq_left=A_ub, ineq_right=b_ub,
+                                                eq_left=A_eq, eq_right=b_eq,
+                                                nonneg_variables=range(len(tasks)))
+                                                #num=simplex.RationalNumbers())
 
     if isinstance(contribs, float):
         contribs = np.array(contribs)
     #print(contribs)
     #this is huge but the tuple comprehension inside the list comprehension prevents extra memory allocation
+    #print(resolution, contribs)
     res_str = ";".join([pair for
-                        pair in (",".join([str(round(contrib, 2)),task]) for
+                        pair in (",".join([str(round(float(contrib), 2)),task]) for
                         contrib,task in zip(contribs, tasks.keys()) if contrib > 0)])
     return "(" + res_str + ")"
 
@@ -452,11 +527,13 @@ def decide_nash(bimatrix):
 def decide_mixed(bimatrix):
     alpha = 0
     beta = 0
+    den_alpha = (bimatrix[0, 0][1] - bimatrix[1, 0][1] - bimatrix[0, 1][1] + bimatrix[1, 1][1])
+    den_beta = (bimatrix[0, 0][0] - bimatrix[0, 1][0] - bimatrix[1, 0][0] + bimatrix[1, 1][0])
+    if den_alpha <= 0 or den_beta <= 0:
+        return BLANK_STRING
+    alpha = (bimatrix[1, 1][1] - bimatrix[1, 0][1]) / den_alpha
 
-    alpha = (bimatrix[1, 1][1] - bimatrix[1, 0][1]) /\
-    (bimatrix[0, 0][1] - bimatrix[1, 0][1] - bimatrix[0, 1][1] + bimatrix[1, 1][1])
-    beta = (bimatrix[1, 1][0] - bimatrix[0, 1][0]) /\
-    (bimatrix[0, 0][0] - bimatrix[0, 1][0] - bimatrix[1, 0][0] + bimatrix[1, 1][0])
+    beta = (bimatrix[1, 1][0] - bimatrix[0, 1][0]) / den_beta
 
     alpha = round(alpha, 2)
     beta = round(beta, 2)
@@ -522,6 +599,7 @@ def split_list_equals(lst):
 
 args = sys.stdin.readline().split(' ')
 agent = Agent(args[0], args[1])
+
 size = 1 if len(args) <= 2 else int(args[2])
 for i in range(0, size):
     if i != 0:
