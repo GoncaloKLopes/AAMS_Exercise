@@ -484,14 +484,14 @@ def decide_risk(tasks):
         return res
 
 
-    if all_pos or all_neg:
+    if all_pos:
         contribs = simple_maximize((-1 * c).tolist())
-
+    elif all_neg:
+        contribs = simple_maximize(np.squeeze(-1 * A_ub).tolist())
     else:
         _, contribs = simplex.linsolve(c, ineq_left=A_ub, ineq_right=b_ub,
                                                 eq_left=A_eq, eq_right=b_eq,
                                                 nonneg_variables=range(len(tasks)))
-                                                #num=simplex.RationalNumbers())
 
     if isinstance(contribs, float):
         contribs = np.array(contribs)
@@ -499,7 +499,7 @@ def decide_risk(tasks):
     #this is huge but the tuple comprehension inside the list comprehension prevents extra memory allocation
     #print(resolution, contribs)
     res_str = ";".join([pair for
-                        pair in (",".join([str(round(float(contrib), 2)),task]) for
+                        pair in (",".join([stringify_float(float(contrib)),task]) for
                         contrib,task in zip(contribs, tasks.keys()) if contrib > 0)])
     return "(" + res_str + ")"
 
@@ -594,6 +594,16 @@ def split_list_equals(lst):
         raise Exception("Not splittable in equal parts.")
 
     return [lst[(i*chunk):((i+1)*chunk)] for i in range(chunk)]
+
+def stringify_float(n):
+    if (n - int(n)) == 0:
+        return str(n) + "0"
+    else:
+        res = str(n)
+        if len(res) == 3:
+            return str(n) + "0"
+        else:
+            return str(n)[:4]
 ################################################################################
 
 
