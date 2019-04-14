@@ -596,6 +596,7 @@ def split_list_equals(lst):
     return [lst[(i*chunk):((i+1)*chunk)] for i in range(chunk)]
 
 def stringify_float(n):
+    n = round(n, 2)
     if (n - int(n)) == 0:
         return str(n) + "0"
     else:
@@ -603,7 +604,7 @@ def stringify_float(n):
         if len(res) == 3:
             return str(n) + "0"
         else:
-            return str(n)[:4]
+            return str(n)
 ################################################################################
 
 
